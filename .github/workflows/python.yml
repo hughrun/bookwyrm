@@ -1,9 +1,9 @@
 name: Python
 on:
   push:
-    branches: [ main ]
+    branches: [ main_test ]
   pull_request:
-    branches: [ main ]
+    branches: [ main_test ]
 
 # overrides for .env.example
 env:
