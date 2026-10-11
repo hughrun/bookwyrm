@@ -193,10 +193,11 @@ def repair_nameless_series(options: dict) -> None:
         print(f"\nFinding names for {series_to_fix.count()} series\n")
 
     for series in series_to_fix:
-        try:
-            refetch_or_fix_individual_series(options, series)
-        except Exception as err:
-            errors.append(err)
+        if not options["dry_run"]:
+            try:
+                refetch_or_fix_individual_series(options, series)
+            except Exception as err:
+                errors.append(err)
         progress += 1
         progress_bar(progress, series_to_fix.count())
 
