@@ -136,19 +136,16 @@ def fix_books(options: dict) -> None:
         print("-" * 50)
 
 
-def refetch_or_fix_individual_series(options: dict, series: Series) -> str | None:
+def refetch_or_fix_individual_series(options: dict, series: Series) -> Series:
     """get series data from inventaire or name from alternative names"""
 
     if series.inventaire_id not in ["", None]:
-        series_list = load_connector().format_series(
-            keys=[f"https://inventaire.io/entity/{series.inventaire_id}"]
-        )
+        series_list = load_connector().format_series(keys=[series.inventaire_id])
         if not series_list or len(series_list) < 1:
             raise ValueError(f"Can't find series data on Inventaire for {series.id}")
 
         data = series_list[0]  # we only passed in one series key
         if "name" not in data:  # let's double check!
-            print("NO NAME IN DATA")
             raise ValueError(f"Can't find series name on Inventaire for {series.id}")
 
         series.name = data["name"]
