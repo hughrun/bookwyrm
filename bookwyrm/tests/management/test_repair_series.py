@@ -7,6 +7,7 @@ from django.test import TestCase
 
 from bookwyrm import models
 from bookwyrm.management.commands.repair_series import (
+    fix_books,
     get_series_json,
     refetch_or_fix_individual_series,
     repair_nameless_series,
@@ -106,12 +107,8 @@ class RepairSeries(TestCase):
         self.assertEqual(return_value, [{"alternative_names": ["boop"]}])
 
         edition.series = self.unusable_string
-        return_value = get_series_json({}, edition)
-        self.assertTrue(isinstance(return_value, str))
-        self.assertEqual(
-            return_value,
-            f"ERROR repairing Edition with id: {edition.id} | series: {self.unusable_string} | error: '{{' was never closed (<unknown>, line 1)",
-        )
+        with self.assertRaises(SyntaxError):
+            return_value = get_series_json({}, edition)
 
     @responses.activate
     def test_refetch_or_fix_individual_series(self):
@@ -210,3 +207,41 @@ class RepairSeries(TestCase):
         self.assertEqual(series.name, "beep")
         # Did it update rather than create a duplicate?
         self.assertEqual(models.Series.objects.count(), 1)
+
+    def test_fix_books(self):
+        """test the actual fix books command"""
+
+        self.assertEqual(models.Series.objects.count(), 0)
+
+        work = models.Work.objects.create(title="parent of beep")
+        edition = models.Edition.objects.create(
+            title="beep", parent_work=work, series=str(self.series_string)
+        )
+
+        fix_books({"verbosity": 1, "names": False, "dry_run": False})
+
+        work.refresh_from_db()
+        edition.refresh_from_db()
+
+        self.assertEqual(models.Series.objects.count(), 1)
+        self.assertEqual(edition.series, None)
+        self.assertEqual(work.series, None)
+        self.assertEqual(models.SeriesBook.objects.first().book.id, work.id)
+        self.assertEqual(models.Series.objects.first().name, "beep")
+
+    def test_fix_books_with_error(self):
+        """test the actual fix books command"""
+
+        self.assertEqual(models.Series.objects.count(), 0)
+
+        work = models.Work.objects.create(title="parent of beep")
+        edition = models.Edition.objects.create(
+            title="beep", parent_work=work, series=str(self.unusable_string)
+        )
+
+        fix_books({"verbosity": 1, "names": False, "dry_run": False})
+
+        edition.refresh_from_db()
+
+        self.assertEqual(models.Series.objects.count(), 0)
+        self.assertEqual(edition.series, "[{error")

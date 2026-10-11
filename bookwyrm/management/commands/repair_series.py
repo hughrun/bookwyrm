@@ -32,15 +32,10 @@ def progress_bar(step, total):
 def get_series_json(options: dict, book: Edition) -> dict | None:
     """return a dict from a series string"""
 
-    try:
-        series = ast.literal_eval(book.series.strip())
-        if isinstance(series, list) and isinstance(series[0], dict):
-            return series
-        error = "Cannot parse into JSON"
-    except Exception as err:
-        error = err
-
-    return f"ERROR repairing Edition with id: {book.id} | series: {book.series} | error: {error}"
+    series = ast.literal_eval(book.series.strip())
+    if isinstance(series, list) and isinstance(series[0], dict):
+        return series
+    raise ValueError(f"Series values in edition {book.id} cannot be parsed to JSON")
 
 
 def fix_books(options: dict) -> None:
@@ -56,25 +51,25 @@ def fix_books(options: dict) -> None:
     if options["verbosity"] > 0:
         print("\nChecking editions for faulty series...\n")
     for edition in editions:
-        if not hasattr(edition, "parent_work"):
-            errors.append(
-                f"ERROR repairing Edition with id: {edition.id} | series: {edition.series} | No parent_work"
-            )
-        else:
-            series = get_series_json(options, edition)
-            edition.series = series
-            if isinstance(series, str):
-                errors.append(series)
-            elif "name" in series:
-                if not options["dry_run"]:
-                    load_connector().get_or_create_seriesbook_from_data(
-                        work=edition.parent_work, edition=edition
-                    )
+        try:
+            if not edition.parent_work:
+                raise ValueError(f"Edition {edition.id} has no parent work")
             else:
-                nameless.append(edition)
+                series = get_series_json(options, edition)
+                edition.parent_work.series = series
+                if "name" in series[0]:
+                    if not options["dry_run"]:
+                        edition.series = series[0]["name"]
+                        load_connector().get_or_create_seriesbook_from_data(
+                            work=edition.parent_work, edition=edition
+                        )
+                else:
+                    nameless.append(edition)
 
-        edition_progress += 1
-        progress_bar(edition_progress, editions.count())
+            edition_progress += 1
+            progress_bar(edition_progress, editions.count())
+        except Exception as err:
+            errors.append(err)
 
     if options["names"]:
         if nameless and options["verbosity"] > 0:
@@ -83,20 +78,21 @@ def fix_books(options: dict) -> None:
             )
         for data in nameless:
             try:
-                series = Series(**data.series[0])
-            except Exception as err:
-                nameless_errors.append(
-                    f"ERROR fixing unnamed series on Edition with id: {data.id} | series: {data.series} | error: {err}"
-                )
-            if not options["dry_run"]:
-                return_value = refetch_or_fix_individual_series(options, series)
-                if isinstance(return_value, str):
-                    nameless_errors.append(return_value)
-                else:
+                series = Series(**data.parent_work.series[0])
+                if not options["dry_run"]:
+                    return_value = refetch_or_fix_individual_series(options, series)
                     user = User.objects.get(localname=INSTANCE_ACTOR_USERNAME)
                     SeriesBook.objects.get_or_create(
                         book=data.parent_work, series=return_value, user=user
                     )
+                    update_fields = ["series"]
+                    edition.series = None
+                    edition.parent_work.series = None
+                    edition.save(update_fields=update_fields)
+                    edition.parent_work.save(update_fields=update_fields)
+            except Exception as err:
+                nameless_errors.append(err)
+                continue
 
             nameless_progress += 1
             progress_bar(nameless_progress, len(nameless))
@@ -148,11 +144,12 @@ def refetch_or_fix_individual_series(options: dict, series: Series) -> str | Non
             keys=[f"https://inventaire.io/entity/{series.inventaire_id}"]
         )
         if not series_list or len(series_list) < 1:
-            return f"ERROR fixing nameless series id: {series.id} error: Can't find series data on Inventaire"
+            raise ValueError(f"Can't find series data on Inventaire for {series.id}")
 
         data = series_list[0]  # we only passed in one series key
         if "name" not in data:  # let's double check!
-            return f"ERROR fixing nameless series id: {series.id} error: Can't find series name on Inventaire"
+            print("NO NAME IN DATA")
+            raise ValueError(f"Can't find series name on Inventaire for {series.id}")
 
         series.name = data["name"]
         series.alternative_names = list(
@@ -163,40 +160,43 @@ def refetch_or_fix_individual_series(options: dict, series: Series) -> str | Non
             if hasattr(field, "deduplication_field") and field.name in data:
                 setattr(series, field.name, data[field.name])
                 update_fields.append(field.name)
-        if series.id not in ["", None]:
-            series.save(update_fields=update_fields)
-        else:
-            series.save()
-        return series
 
     elif options["all"]:
         # there is no inventaire_id so we can't just re-fetch the series
         # try using the first alternative name if we have one
         if not series.alternative_names:
-            return f"ERROR fixing nameless series id: {series.id} error: No names or inventaire id"
+            raise ValueError(
+                f"Can't fix nameless series. No names or inventaire id for {series.id}"
+            )
 
         series.name = series.alternative_names[0]
-        series.save(update_fields=["name"])
-        return series
+        update_fields = ["name"]
+
+    if series.id not in ["", None]:
+        series.save(update_fields=update_fields)
+    else:
+        series.user = User.objects.get(localname=INSTANCE_ACTOR_USERNAME)
+        series.save()
+    return series
 
 
 def repair_nameless_series(options: dict) -> None:
     """fix series that don't have names"""
 
     if options["dry_run"]:
-        print("It is not possible to repair nameless series during a dry run")
+        raise Exception("It is not possible to repair nameless series during a dry run")
 
-    series_to_fix = Series.objects.filter(name__in=["", None])
-    progress = 0
     errors = []
-
+    progress = 0
+    series_to_fix = Series.objects.filter(name__in=["", None])
     if options["verbosity"] > 0:
         print(f"\nFinding names for {series_to_fix.count()} series\n")
 
     for series in series_to_fix:
-        return_value = refetch_or_fix_individual_series(options, series)
-        if isinstance(return_value, str):
-            errors.append(return_value)
+        try:
+            refetch_or_fix_individual_series(options, series)
+        except Exception as err:
+            errors.append(err)
         progress += 1
         progress_bar(progress, series_to_fix.count())
 
